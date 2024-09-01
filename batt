@@ -1,0 +1,203 @@
+#!/bin/bash
+
+# Function to set the conservative thresholds
+set_prot()
+{
+    # If the previous level is not conservative set
+    # very common conservative charging thresholds
+    if [ $prev_stop -gt 95 ]; then
+        prev_start=50
+        prev_stop=80
+    fi
+    # Check if we are running as root, if not exit
+    if [ $(id -u) -eq 0 ]; then
+        echo $prev_start > /sys/class/power_supply/BAT0/charge_start_threshold
+	    echo $prev_stop > /sys/class/power_supply/BAT0/charge_stop_threshold
+    else
+	    echo "root required!"
+    fi
+    return 0
+}
+
+# Function to set the max thresholds to charge to the max
+set_full()
+{
+    # Check if we are running as root, if not exit
+    if [ $(id -u) -eq 0 ]; then
+        echo 100 > /sys/class/power_supply/BAT0/charge_stop_threshold
+        echo 96 > /sys/class/power_supply/BAT0/charge_start_threshold
+    else
+    	echo "root required!"
+    fi
+    return 0
+}
+
+# Function to charge to the max and then switch back to 
+# the previous conservative charging thresholds
+fullcharge()
+{
+    # Check if we are running as root, if not exit
+    if [ $(id -u) -ne 0 ]; then
+	    echo "root required"
+	    sleep 1
+        return 0
+    fi
+    clear
+    echo "Charging battery to full capacity..."
+    echo "Waiting to set charging thresholds"    
+    set_full
+    # Setting the designation to the state of charging
+    designation="Charging"
+    check="$designation"
+    # Retrieve the current charge level
+    charge=$(cat /sys/class/power_supply/BAT0/uevent | grep POWER_SUPPLY_CAPACITY= | cut -d "=" -f2-)
+    sleep 2
+    clear
+    echo "Charging battery to full capacity..."
+    echo "Press x to exit."
+    echo ""
+    # Cycling through the loop as long as the battery is charging
+    # and its level is below 99%
+    while [[ "$check" = "$designation" ]] || [ $charge -lt 99 ]
+    do
+        # Retrieve the battery parameters: status and charge level
+	    check=$(cat /sys/class/power_supply/BAT0/uevent | grep POWER_SUPPLY_STATUS= | cut -d "=" -f2-)
+	    charge=$(cat /sys/class/power_supply/BAT0/uevent | grep POWER_SUPPLY_CAPACITY= | cut -d "=" -f2-)
+        echo -n $check": "$charge" %"
+        # Using key input also as a waiting step in the loop
+        read -rsn1 -t 3 nf
+        case $nf in
+            # Pressing x leaves the function and sets the charging 
+            # thresholds back to conservative
+            x)
+                echo ""
+                echo "Cancelling! Setting battery level to normal again."
+                set_prot
+                sleep 2
+                return 0
+                ;;
+            *) ;;
+        esac
+    	echo -ne "                                                       \r"
+    done
+    echo "Finished. Setting battery level to normal again."
+    sleep 1
+    set_prot
+}
+
+# Function to continously display current battery information
+checkbatt()
+{
+    clear
+    # Never end until x pressed (key input is checked below)
+    while true
+    do
+        state=$(cat /sys/class/power_supply/BAT0/uevent | grep POWER_SUPPLY_STATUS= | cut -d "=" -f2-)
+        echo "Battery information:"
+        echo ""
+        # Get the current power consumption
+        watt=$(cat /sys/class/power_supply/BAT0/uevent | grep POWER_NOW= | cut -d "=" -f2-)
+        watt=$(awk "BEGIN {y=1000000;print $watt/y}")
+        watt_p=$(printf '%.1f' $watt)
+        # If the battery charges, it would show charging wattage
+        # which is not current power consumption
+        if [ "$state" = "Charging" ]; then
+            watt_p="... charging"
+        fi
+        echo "Current power use (W):     " $watt_p
+        # Show the battery designed full capacity
+        design=$(cat /sys/class/power_supply/BAT0/uevent | grep ENERGY_FULL_DESIGN= | cut -d "=" -f2-)
+        design=$(awk "BEGIN {y=1000000;print $design/y}")
+        design_p=$(printf '%.1f' $design)
+        echo "Designed capacity (Wh):    " $design_p
+        # Show the current battery full capacity 
+        full=$(cat /sys/class/power_supply/BAT0/uevent | grep ENERGY_FULL= | cut -d "=" -f2-)
+        full=$(awk "BEGIN {y=1000000;print $full/y}")
+        full_p=$(printf '%.1f' $full)
+        echo "Current capacity left (Wh):" $full_p
+        # Calculate and display the battery health
+        capacity=$(awk "BEGIN {print $full/$design*100}")
+        capacity_p=$(printf '%.1f' $capacity)
+        echo "Battery health (%):        " $capacity_p
+        # Show the number of charging cycles
+        cycle=$(cat /sys/class/power_supply/BAT0/uevent | grep CYCLE_COUNT= | cut -d "=" -f2-)
+        echo "Charging cycles (#):       " $cycle
+        echo ""
+        # Display the current power left
+        now=$(cat /sys/class/power_supply/BAT0/uevent | grep ENERGY_NOW= | cut -d "=" -f2-)
+        now=$(awk "BEGIN {y=1000000;print $now/y}")
+        now_p=$(printf '%.1f' $now)
+        echo "Current power left (Wh):   " $now_p
+        # Show the percentage of power left, based on current full capacity
+        charge=$(awk "BEGIN {print $now/$full*100}")
+        charge_p=$(printf '%.1f' $charge)
+        # Display the charging thresholds
+        echo "Charging level (%):        " $charge_p
+        echo ""
+        start=$(cat /sys/class/power_supply/BAT0/charge_start_threshold)
+        echo "Start charging (%):        " $start
+        stop=$(cat /sys/class/power_supply/BAT0/charge_stop_threshold)
+        echo "Stop charging (%):         " $stop
+        echo ""
+        # Calculate the battery life based on current full
+        # capacity and current capacity left at the current power
+        # consumtion level
+        remain=0
+        test=${watt%.*}
+        # Only calculate if the battery is in use
+        if [ "$state" = "Discharging" ]; then
+            # Calculate total battery life if power consumption is not zero
+            if [ $test -gt 0 ]; then
+                remain=$(awk "BEGIN {print $full/$watt}")
+            fi
+            remain_p=$(printf '%.1f' $remain)
+            echo "Charged battery time (h):  " $remain_p
+            # Calculate battery life left if power consumption is not zero
+            if [ $test -gt 0 ]; then
+                remain=$(awk "BEGIN {print $now/$watt}")
+            fi 
+            remain_p=$(printf '%.1f' $remain)
+            echo "Current time left (h):     " $remain_p
+            echo ""
+        fi
+        echo ""
+        echo "Set full cha[r]ge | set battery [p]rotection | [f]ully charge"
+        echo ""
+        echo "E[x]it"
+        # Pressing x leaves the function
+        read -rsn1 -t 2 nc
+        case $nc in
+            x) exit 0 ;;
+            f) fullcharge ;;
+            r) set_full ;;
+            p) set_prot ;;
+            *) ;;
+        esac
+        clear
+    done
+}
+
+# Initally, keep the users thresholds in mind
+prev_start=$(cat /sys/class/power_supply/BAT0/charge_start_threshold)
+prev_stop=$(cat /sys/class/power_supply/BAT0/charge_stop_threshold)
+
+# Check for optionally given parameters, if none given
+# start the checkbatt function which is practically a
+# main menu
+case $1 in
+    prot)
+	set_prot
+    ;;
+    full)
+	set_full
+    ;;
+    help)
+	echo "Parameters: prot, full, fullcharge, check"
+    ;;
+    fullcharge)
+	fullcharge
+    ;;
+    *)
+	checkbatt
+    ;;
+esac

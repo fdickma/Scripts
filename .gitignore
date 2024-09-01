@@ -1,0 +1,8 @@
+.vscode/
+logs
+*.log
+*.key
+*.bak
+__pycache__/
+*.pdf
+*.zip
